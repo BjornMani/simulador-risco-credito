@@ -1,23 +1,9 @@
-#  Projeto: Simulador de Inadimplência de Operações de Crédito (PF/PJ e Crédito Rural)
+#  Relatório Técnico: Modelagem de Risco de Crédito (Inadimplência PF/PJ/Rural)
+**Autor:** Pedro Rogério Pereira Júnior
+**Data:** *Dezembro/2025*
+**Link do Simulador:** *``https://simulador-risco-credito-inadimplencia.streamlit.app/``*
 
-## 1. Organização do Modelo (Limpeza e Reprodutibilidade)
-projeto_inadimplencia/
-├── app.py
-├── models/
-│   ├── model_PF.pkl      # Apenas os .pkl finais (Ridge/Focados)
-│   ├── scaler_PF.pkl
-│   ├── columns_PF.csv
-│   └── last_values_PF.csv
-│   # ... (repita para PJ, Rural, etc. Apague os antigos XGBoost se não estiver usando)
-├── data/
-│   └── processed/df_modelagem_v3.csv
-├── notebooks/
-│   ├── 01_coleta_variaveis.ipynb
-│   ├── 02_analise_exploratoria.ipynb
-│   ├── 03_treinamento_final_focado.ipynb # Renomeie o '08' para ser o oficial
-│   └── archive/          # Jogue os notebooks 04, 05, 06, 07 aqui
-└── requirements.txt      # CRÍTICO para reprodução
-
+## Arquitetura: 
 projeto_inadimplencia/
 ├── api/  
 ├── dashboard/  
@@ -75,4 +61,48 @@ projeto_inadimplencia/
 ├── app_4.py  
 ├── app_5.py  
 ├── readme.md    
-└── requirements.txt 
+└── requirements.txt
+
+## 1. O Problema de Negócio
+_____O objetivo deste projeto foi desenvolver um motor preditivo capaz de antecipar o comportamento da Inadimplência (Pessoa Física, Jurídica e Rural) frente a choques macroeconômicos (Selic, Inflação e Câmbio) em um horizonte de 18 meses.
+    
+_____A principal dor resolvida é a **falta de sensibilidade** dos modelos tradicionais de curto prazo, que tendem a replicar o passado recente (inércia) e falham em simular cenários de stress (ex: disparada do Dólar ou da Selic).
+
+## 2. Metodologia e Evolução dos Modelos
+_____O desenvolvimento passou por **três fases** distintas até atingir a solução final.
+    **- Fase 1:** *Random Forest & XGBoost* (Abordagem Tradicional)
+        Inicialmente, foram treinados modelos de árvore (*Ensemble*) utilizando mais de 50 variáveis macroeconômicas e *lags* (atrasos) temporais.
+        **- Resultado:** Alta precisão no curto prazo (RMSE baixo), mas **baixa sensibilidade** a cenários.
+        **Problema Detectado:** Os modelos "ancoravam" na variável ``inadimplencia_lag_1`` (valor do mês anterior) e ignoravam as mudanças na Selic simulada, resultando em linhas retas nas projeções de longo prazo.
+    **- Fase 2:** *Ridge Regression* (Abordagem Econométrica)
+        Para corrigir a insensibilidade, migramos para modelos lineares regularizados (Ridge).
+        Resultado: O modelo passou a respeitar a correlação (Se Selic sobe, Inadimplência sobe), mas sofria com "Explosão de Coeficientes", gerando previsões irreais (ex: 180% de inadimplência) devido à multicolinearidade entre variáveis redundantes (Selic vs CDI vs Spread).
+    **Fase 3:** Modelo de Sensibilidade Focada (Solução Final)
+        Adotamos uma abordagem de *Feature Selection* Cirúrgica. O modelo final foi treinado utilizando apenas as **"Alavancas de Controle"**:
+            **Selic** (Defasada em 6 meses): Principal driver para PF e PJ Urbana.
+            **IPCA**: Proxy para corrosão de renda.
+            **Dólar PTAX**: Principal driver para o Crédito Rural (receita de exportação).
+            **Sazonalidade** (Safra/Mês): Para capturar ciclos do Agro e Varejo.
+        Essa abordagem sacrificou marginalmente a precisão do "próximo mês" em troca de uma **alta capacidade de simulação de tendências (*Stress Testing*)**, que era o objetivo principal do simulador.
+
+## 3. Arquitetura da Solução
+- **Linguagem:** *Python* 3.10
+- **Coleta de Dados:** Séries temporais do Banco Central (SGS), IBGE e INMET.
+- **Engine de ML:** *Scikit-Learn* (*Ridge Regression* e *StandardScaler*).
+- **Frontend:** *Streamlit* (Hospedado em *Streamlit Cloud*).
+- **Reprodutibilidade:** Controle de dependências via ``requirements.txt`` e versionamento via Git.
+
+## 4. Principais *Insights* (Resultados)
+_____A modelagem revelou dinâmicas distintas entre os setores:
+|    **Carteira**      | ***Driver* Principal** | **Comportamento Observado**                                                       |
+|**Pessoa Física**     |Juros (Selic)           |Alta elasticidade. Aumento de juros impacta a inadimplência com lag de 6 a 9 meses.|
+|**Pessoa Jurídica**   |Juros + Atividade       |Segue padrão similar à PF, mas com maior volatilidade.                             |
+|**Rural (Agro)**      |Câmbio (Dólar)          |Correlação inversa. Dólar Alto reduz a inadimplência (aumenta receita do           |
+|                      |                        |exportador). Dólar Baixo é o principal fator de risco para esta carteira.          |
+
+## 5. Como Utilizar o Simulador
+    1 - Acesse o painel online.
+    2 - Atualize os valores iniciais (Selic/Dólar) com os dados de mercado do dia (visto que o modelo parte do último dado histórico do dataset).
+    3 - Utilize os sliders de tendência para simular choques:
+        Ex: O que acontece com a carteira Rural se o Dólar cair R$ 0,20 ao mês pelos próximos 18 meses?
+    4 - O gráfico projetará a curva de inadimplência esperada para o cenário definido.
