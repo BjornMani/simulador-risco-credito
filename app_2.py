@@ -2,153 +2,249 @@ import streamlit as st
 import pandas as pd
 import joblib
 import numpy as np
-import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
+import plotly.graph_objects as go
+from pathlib import Path
+from datetime import datetime
 
-# --- Configuração ---
-st.set_page_config(page_title="Simulador Avançado de Risco", layout="wide", page_icon="🌾")
+# --- 1. Configuração da Página ---
+st.set_page_config(
+    page_title="Arena de Modelos - Risco de Crédito",
+    page_icon="⚔️",
+    layout="wide"
+)
 
-st.title("🌾 Simulador Avançado de Risco de Crédito")
-st.markdown("Projeções dinâmicas com Sazonalidade (Safra/Varejo) e Tendências Econômicas.")
+# Estilização Customizada
+st.markdown("""
+<style>
+    .big-font { font-size:20px !important; font-weight: bold; }
+    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
+    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #f0f2f6; border-radius: 4px 4px 0px 0px; gap: 1px; padding-top: 10px; padding-bottom: 10px; }
+    .stTabs [aria-selected="true"] { background-color: #ffffff; border-top: 2px solid #ff4b4b; }
+</style>
+""", unsafe_allow_html=True)
 
-# --- Funções ---
-def load_assets(segmento):
+st.title("⚔️ Arena de Modelos: Simulador de Cenários")
+st.markdown("""
+Compare como diferentes "cérebros" de Inteligência Artificial reagem a choques econômicos.
+**Objetivo:** Entender a sensibilidade da carteira a mudanças na taxa de juros (Selic) nos próximos 18 meses.
+""")
+
+# --- 2. Carga de Artefatos ---
+@st.cache_resource
+# Trecho ajustado da função load_assets no app_2.py
+
+def load_assets(segmento, algoritmo_nome):
+    base_path = Path("models")
+    
     try:
-        model = joblib.load(f"models/model_{segmento}.pkl")
-        scaler = joblib.load(f"models/scaler_{segmento}.pkl")
-        cols = pd.read_csv(f"models/columns_{segmento}.csv").columns.tolist()
-        last_vals = pd.read_csv(f"models/last_values_{segmento}.csv", index_col=0).squeeze()
+        model = joblib.load(base_path / f"model_{segmento}_{algoritmo_nome}.pkl")
+        
+        # --- PROTEÇÃO CONTRA O ERRO DE 50 vs 45 ---
+        # Verifica quantas features o modelo espera
+        n_features_model = getattr(model, "n_features_in_", None)
+        
+        # Carrega o Scaler
+        scaler = joblib.load(base_path / f"scaler_{segmento}.pkl")
+        
+        # Verifica se o Scaler bate com o Modelo
+        if n_features_model and scaler.n_features_in_ != n_features_model:
+            st.error(f"ERRO CRÍTICO: O Scaler tem {scaler.n_features_in_} colunas, mas o Modelo quer {n_features_model}.")
+            st.warning("Solução: Delete os arquivos da pasta 'models/' e rode o Notebook de treinamento novamente.")
+            return None, None, None, None
+
+        cols = pd.read_csv(base_path / f"columns_{segmento}.csv").columns.tolist()
+        last_vals = pd.read_csv(base_path / f"last_values_{segmento}.csv", index_col=0).squeeze()
+        
         return model, scaler, cols, last_vals
-    except:
+        
+    except FileNotFoundError:
         return None, None, None, None
 
-def predict_dynamic(model, scaler, base_input, start_inad, selic_trend, months=18):
+# --- 3. Motor de Simulação Dinâmica ---
+def run_simulation(model, scaler, feature_names, initial_input, start_inad, selic_trend, months=18):
     """
-    Simulação Dinâmica Corrigida:
-    Passa um DataFrame com nomes de colunas para o Scaler para evitar Warnings.
+    Simula o futuro mês a mês.
+    Lógica:
+    1. Atualiza Selic baseada na tendência escolhida.
+    2. Atualiza Sazonalidade (Mês).
+    3. Prever o Delta.
+    4. Atualiza o valor acumulado.
     """
     predictions = []
     current_inad = start_inad
     
-    # Pega o mês atual da última coleta (ou usa o atual do sistema)
-    current_month = int(base_input.get('mes', datetime.now().month))
+    # Prepara o dicionário de input inicial
+    current_input = initial_input.copy()
     
-    # Cópia para manipulação
-    current_input = base_input.copy()
+    # Descobre qual mês estamos (pela feature 'mes' ou data atual)
+    current_month = int(current_input.get('mes', datetime.now().month))
     
-    # Lista oficial de colunas que o scaler espera (na ordem correta)
-    feature_names = scaler.feature_names_in_
+    # Valor base da Selic (pega o lag mais recente disponível ou define 10.5 como padrão)
+    selic_base = current_input.get('selic_lag_6', current_input.get('selic', 10.5))
     
     for i in range(months):
-        # 1. Atualizar Variáveis Dinâmicas
-        current_input['target_lag_1'] = current_inad
+        # --- A. Choque na Economia (Cenário) ---
+        delta_selic = selic_trend * (i + 1)
+        new_selic = max(2.0, min(30.0, selic_base + delta_selic))
         
-        # A Selic muda conforme a tendência definida pelo usuário
-        # Pegamos o valor anterior e somamos a tendência
-        old_selic = current_input.get('selic_lag_6', 10.0)
-        new_selic = old_selic + selic_trend 
+        for col in feature_names:
+            if 'selic' in col.lower():
+                current_input[col] = new_selic
         
-        # Trava limites lógicos
-        new_selic = max(2.0, min(40.0, new_selic))
-        current_input['selic_lag_6'] = new_selic
-        
-        # Avançar o calendário (Sazonalidade)
+        # --- B. Atualiza Sazonalidade ---
         current_month += 1
         if current_month > 12: current_month = 1
         
-        # Atualiza mês e safra se as colunas existirem no modelo
-        if 'mes' in list(current_input.index):
-            current_input['mes'] = current_month
-        if 'periodo_safra' in list(current_input.index):
-            current_input['periodo_safra'] = 1 if current_month in [2,3,4,5] else 0
-            
-        # 2. Escalar e Prever (CORREÇÃO AQUI)
-        # Criamos um DataFrame de 1 linha com as colunas na ordem exata que o Scaler aprendeu
-        df_input = pd.DataFrame([current_input])
+        if 'mes' in feature_names: current_input['mes'] = current_month
         
-        # Reindex garante que se faltar alguma coluna, ele preenche com 0, 
-        # e se tiver coluna sobrando, ele ignora. E põe na ordem certa.
-        df_input = df_input.reindex(columns=feature_names, fill_value=0)
+        # --- C. Previsão ---
+        df_step = pd.DataFrame([current_input])
         
-        # Passamos o DataFrame (com nomes!) para o transform
-        scaled = scaler.transform(df_input)
+        # Garante ordem e colunas corretas (preenche faltantes com 0)
+        df_step = df_step.reindex(columns=feature_names, fill_value=0)
         
-        pred = model.predict(scaled)[0]
-        predictions.append(pred)
+        # Escala e Prevê
+        X_scaled = scaler.transform(df_step)
+        delta_pred = model.predict(X_scaled)[0]
         
-        current_inad = pred
+        # --- D. Acumulação ---
+        current_inad += delta_pred
+        
+        # Trava de segurança (não existe inadimplência < 0)
+        current_inad = max(0.0, current_inad)
+        predictions.append(current_inad)
         
     return predictions
 
-# --- Interface ---
-tabs = st.tabs(["👤 Pessoa Física", "🏢 Pessoa Jurídica", "🚜 Rural PF", "🚜 Rural PJ"])
-mapa = {"👤 Pessoa Física": "PF", "🏢 Pessoa Jurídica": "PJ", "🚜 Rural PF": "Rural_PF", "🚜 Rural PJ": "Rural_PJ"}
+# --- 4. Sidebar: Configuração da IA ---
+st.sidebar.header("🧠 Configuração da IA")
 
-for tab_name, segmento in mapa.items():
-    with tabs[list(mapa.keys()).index(tab_name)]:
-        model, scaler, cols, last_vals = load_assets(segmento)
+algo_options = {
+    "RandomForest": "RandomForest",
+    "XGBoost": "XGBoost",
+    "Ridge (Linear)": "Ridge"
+}
+
+nome_amigavel = st.sidebar.selectbox("Escolha o Algoritmo:", list(algo_options.keys()))
+algoritmo_chave = algo_options[nome_amigavel]
+
+st.sidebar.info(f"""
+**{nome_amigavel}**:
+{'Detecta padrões complexos e não-lineares.' if 'Forest' in nome_amigavel else ''}
+{'Focado em corrigir erros e alta performance.' if 'XGB' in nome_amigavel else ''}
+{'Simples, robusto e mostra a tendência macro.' if 'Ridge' in nome_amigavel else ''}
+""")
+
+# --- 5. Interface Principal (Tabs) ---
+
+# Mapeamento: Nome na Aba -> Sufixo do Arquivo
+segmentos = {
+    "👤 Pessoa Física": "PF",
+    "🏢 Pessoa Jurídica": "PJ",
+    "🚜 Rural PF": "Rural_PF",
+    "🚜 Rural PJ": "Rural_PJ"
+}
+
+tabs = st.tabs(list(segmentos.keys()))
+
+for aba_nome, segmento_id in segmentos.items():
+    with tabs[list(segmentos.keys()).index(aba_nome)]:
         
-        if not model:
-            st.error("Modelo não encontrado. Re-treine com os novos dados.")
+        # Carregar Modelo Específico
+        model, scaler, cols, last_vals = load_assets(segmento_id, algoritmo_chave)
+        
+        if model is None:
+            st.warning(f"⚠️ Modelo '{algoritmo_chave}' para '{segmento_id}' não encontrado.")
+            st.caption("Dica: Verifique se rodou o notebook '06_treinamento_comparativo.ipynb' ou '07'.")
             continue
-            
-        col_cfg, col_chart = st.columns([1, 2])
+
+        # --- Layout de Colunas ---
+        c_settings, c_chart = st.columns([1, 3])
         
-        with col_cfg:
-            st.subheader("Parâmetros de Simulação")
+        with c_settings:
+            st.subheader("Parâmetros")
             
-            # 1. Ponto de Partida
-            st.markdown("**1. Ponto de Partida**")
-            inad_start = st.number_input("Inadimplência Inicial (%)", value=float(last_vals.get('target_lag_1', 3.0)), step=0.1, key=f"start_{segmento}")
-            selic_start = st.number_input("Selic Inicial (%)", value=float(last_vals.get('selic_lag_6', 11.0)), step=0.25, key=f"selic_{segmento}")
-            
-            st.markdown("---")
-            
-            # 2. Tendência (A Mágica da Dinâmica)
-            st.markdown("**2. Tendência Econômica (Próx. 18 meses)**")
-            trend_selic = st.slider(
-                "Evolução da Selic (pp/mês)", 
-                min_value=-0.50, max_value=0.50, value=0.0, step=0.05,
-                format="%.2f",
-                key=f"trend_{segmento}",
-                help="Ex: -0.10 significa que a Selic cairá 0.10% todo mês (Queda de juros)."
+            # Ponto de Partida
+            val_inicial = float(last_vals.get('target_lag_1', 3.0))
+            start_inad = st.number_input(
+                "Inadimplência Atual (%)", 
+                value=val_inicial, format="%.2f", step=0.1, 
+                key=f"start_{segmento_id}"
             )
             
-            txt_trend = "Estável"
-            if trend_selic < 0: txt_trend = "Queda de Juros (Otimista)"
-            if trend_selic > 0: txt_trend = "Aumento de Juros (Pessimista)"
-            st.caption(f"Cenário: **{txt_trend}**")
+            st.markdown("---")
+            st.write("**Cenário Selic**")
+            
+            # Slider de Tendência
+            selic_trend = st.slider(
+                "Variação Mensal (pontos base)",
+                min_value=-0.5, max_value=0.5, value=0.0, step=0.05,
+                format="%+.2f pp",
+                key=f"trend_{segmento_id}",
+                help="Ex: +0.10 significa que a Selic sobe 0.10% todo mês."
+            )
+            
+            total_change = selic_trend * 12
+            st.caption(f"Impacto em 1 ano: **{total_change:+.2f}% na Selic**")
 
-        with col_chart:
-            # Base Input
-            base_input = pd.Series(last_vals)
-            base_input['selic_lag_6'] = selic_start
-            
-            # Simulação
-            projecao = predict_dynamic(model, scaler, base_input, inad_start, trend_selic)
-            
-            # Gráfico
-            meses = range(1, 19)
-            fig, ax = plt.subplots(figsize=(10, 5))
-            
-            # Estilo dependendo do segmento
-            color = 'green' if 'Rural' in segmento else 'blue'
-            
-            ax.plot(meses, projecao, marker='o', color=color, linewidth=2, label=f"Projeção {segmento}")
-            
-            # Títulos e Eixos
-            ax.set_title(f"Projeção 18 Meses: {segmento}", fontsize=14)
-            ax.set_ylabel("Inadimplência (%)")
-            ax.set_xlabel("Meses à Frente")
-            ax.grid(True, linestyle='--', alpha=0.5)
-            
-            # Destaque Final
-            final = projecao[-1]
-            ax.annotate(f"{final:.2f}%", (18, final), xytext=(18, final + (final*0.05)), 
-                        ha='center', fontweight='bold', color=color)
-            
-            st.pyplot(fig)
-            
-            # Insights
-            var_total = projecao[-1] - projecao[0]
-            st.info(f"Neste cenário, a inadimplência varia **{var_total:+.2f} pp** em 18 meses.")
+        with c_chart:
+            # --- Executar Simulação ---
+            try:
+                # 1. Simulação "Base" (Selic Constante)
+                pred_base = run_simulation(model, scaler, cols, last_vals, start_inad, selic_trend=0.0)
+                
+                # 2. Simulação "Cenário" (Com a tendência escolhida)
+                pred_scenario = run_simulation(model, scaler, cols, last_vals, start_inad, selic_trend=selic_trend)
+                
+                # --- Plotagem com Plotly ---
+                fig = go.Figure()
+                
+                meses = list(range(1, 19))
+                
+                # Linha Base (Cinza)
+                fig.add_trace(go.Scatter(
+                    x=meses, y=pred_base,
+                    mode='lines',
+                    name='Cenário Estável',
+                    line=dict(color='gray', width=2, dash='dot'),
+                    opacity=0.6
+                ))
+                
+                # Linha Cenário (Colorida)
+                cor_linha = '#ff4b4b' if pred_scenario[-1] > start_inad else '#00C853'
+                fig.add_trace(go.Scatter(
+                    x=meses, y=pred_scenario,
+                    mode='lines+markers',
+                    name=f'Cenário Simulad ({algoritmo_chave})',
+                    line=dict(color=cor_linha, width=4)
+                ))
+                
+                # Layout
+                fig.update_layout(
+                    title=f"Projeção de 18 Meses: {aba_nome}",
+                    xaxis_title="Meses à Frente",
+                    yaxis_title="Taxa de Inadimplência (%)",
+                    hovermode="x unified",
+                    height=500,
+                    template="plotly_white",
+                    yaxis=dict(showgrid=True, gridcolor='#f0f0f0')
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Métricas Finais
+                delta_total = pred_scenario[-1] - start_inad
+                st.metric(
+                    label="Projeção para o Mês 18",
+                    value=f"{pred_scenario[-1]:.2f}%",
+                    delta=f"{delta_total:+.2f} p.p. acumulados",
+                    delta_color="inverse" # Vermelho se subir
+                )
+                
+            except Exception as e:
+                st.error("Erro na Simulação.")
+                st.exception(e)
+
+# Rodapé
+st.markdown("---")
+st.caption("Sistema de Inteligência Competitiva de Crédito • v2.0 Pro")

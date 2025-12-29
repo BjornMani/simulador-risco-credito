@@ -2,103 +2,237 @@ import streamlit as st
 import pandas as pd
 import joblib
 import numpy as np
+import plotly.graph_objects as go
+from pathlib import Path
 
-# Configuração da Página
-st.set_page_config(page_title="Simulador de Risco de Crédito", layout="wide")
+# --- 1. Configuração da Página ---
+st.set_page_config(
+    page_title="Simulador de Risco de Crédito",
+    page_icon="🏦",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# Título e Descrição
-st.title("🏦 Simulator de Inadimplência (Pessoa Física)")
 st.markdown("""
-Este painel utiliza um modelo de Machine Learning (Random Forest) para prever 
-a taxa de inadimplência baseada em cenários econômicos.
-""")
+<style>
+    .metric-card {
+        background-color: #f9f9f9;
+        border: 1px solid #e0e0e0;
+        padding: 20px;
+        border-radius: 10px;
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.05);
+    }
+    .stAlert {
+        border-radius: 8px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# --- 1. Carga dos Artefatos ---
+# --- 2. Funções de Carga ---
 @st.cache_resource
-def load_assets():
-    model = joblib.load("models/model_final.pkl")
-    scaler = joblib.load("models/scaler_final.pkl")
-    # Carrega a estrutura de colunas usada no treino para garantir compatibilidade
-    sample_data = pd.read_csv("data/processed/X_train_sample.csv")
-    return model, scaler, sample_data
+def load_model_assets(segmento):
+    """
+    Carrega o Modelo, Scaler, Lista de Colunas e Metadados para o segmento escolhido.
+    """
+    base_path = Path("models")
+    
+    try:
+        model = joblib.load(base_path / f"model_{segmento}.pkl")
+        scaler = joblib.load(base_path / f"scaler_{segmento}.pkl")
+        cols_df = pd.read_csv(base_path / f"columns_{segmento}.csv")
+        cols = cols_df.columns.tolist()
+        meta = joblib.load(base_path / f"meta_{segmento}.pkl")
+        
+        return model, scaler, cols, meta
+    except FileNotFoundError:
+        return None, None, None, None
 
-try:
-    model, scaler, sample_data = load_assets()
-except FileNotFoundError:
-    st.error("Erro: Arquivos do modelo não encontrados. Verifique se rodou o notebook e salvou em 'models/'.")
-    st.stop()
+# --- 3. Interface Principal ---
 
-# --- 2. Sidebar de Parâmetros (O "What-If") ---
-st.sidebar.header("⚙️ Configurar Cenário")
+# Cabeçalho
+st.title("🏦 Cockpit de Risco de Crédito")
+st.markdown("---")
 
-# Vamos focar nas variáveis TOP IMPORTANCE que você descobriu
-# O usuário mexe nessas, o resto usamos a média histórica
+col_info, col_select = st.columns([2, 1])
 
-# Selic (Defasada 6 meses)
-selic_input = st.sidebar.slider(
-    "Selic (há 6 meses) %", 
-    min_value=2.0, max_value=20.0, value=float(sample_data['selic_lag_6'].mean()), step=0.25
-)
+with col_info:
+    st.markdown("""
+    Este simulador utiliza modelos de **Machine Learning (Random Forest)** treinados para prever a tendência da inadimplência.
+    
+    **Como funciona?**
+    O modelo prevê a **variação (delta)** esperada com base em choques macroeconômicos.
+    """)
 
-# Inadimplência Anterior (Inércia)
-inad_anterior = st.sidebar.slider(
-    "Inadimplência Mês Anterior %", 
-    min_value=1.0, max_value=10.0, value=float(sample_data['target_lag_1'].iloc[-1]), step=0.1
-)
-
-# Spread Bancário PF
-spread_input = st.sidebar.slider(
-    "Spread Bancário PF", 
-    min_value=10.0, max_value=50.0, value=float(sample_data['spread_pf'].mean()), step=0.5
-)
-
-# --- 3. Preparar os Dados para o Modelo ---
-# Criamos um dataframe com 1 linha contendo as médias de tudo
-input_data = pd.DataFrame([sample_data.mean()], columns=sample_data.columns)
-
-# Substituímos pelos valores que o usuário escolheu
-input_data['selic_lag_6'] = selic_input
-input_data['target_lag_1'] = inad_anterior
-input_data['spread_pf'] = spread_input
-
-# Se tivermos outras variáveis importantes, poderíamos adicionar mais sliders.
-# O restante das 50+ colunas ficará com a média histórica (Ceteris Paribus).
-
-# --- 4. Previsão ---
-# Escalar os dados (O modelo espera dados padronizados)
-input_data_scaled = scaler.transform(input_data)
-
-# Prever
-prediction = model.predict(input_data_scaled)[0]
-
-# --- 5. Exibição dos Resultados ---
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("Previsão de Inadimplência")
-    st.metric(
-        label="Taxa Esperada (Mês seguinte)", 
-        value=f"{prediction:.2f}%",
-        delta=f"{prediction - inad_anterior:.2f}% vs Mês Anterior"
+with col_select:
+    segmento_escolhido = st.selectbox(
+        "Selecione a Carteira:",
+        ["PF", "PJ", "Rural_PF", "Rural_PJ"],
+        index=0
     )
 
-with col2:
-    st.subheader("Análise de Sensibilidade")
-    st.write("Impacto da Selic (Defasada) no resultado:")
-    
-    # Pequeno gráfico mostrando como a Selic afeta o resultado (mantendo o resto fixo)
-    sensibilidade = []
-    selic_range = np.linspace(2, 20, 20)
-    
-    for s in selic_range:
-        temp_df = input_data.copy()
-        temp_df['selic_lag_6'] = s
-        # Escalar e prever
-        pred_s = model.predict(scaler.transform(temp_df))[0]
-        sensibilidade.append(pred_s)
-    
-    chart_data = pd.DataFrame({"Selic Lag 6": selic_range, "Inadimplência Prevista": sensibilidade})
-    st.line_chart(chart_data.set_index("Selic Lag 6"))
+# Carga dos Dados
+model, scaler, feature_cols, meta = load_model_assets(segmento_escolhido)
 
-st.info("Nota: Este modelo assume que as demais variáveis macroeconômicas permanecem constantes na média histórica.")
+if model is None:
+    st.error(f"❌ Modelo para '{segmento_escolhido}' não encontrado na pasta 'models/'. Execute o notebook 05 primeiro.")
+    st.stop()
+
+# --- 4. Sidebar: Controle de Cenários ---
+st.sidebar.header(f"⚙️ Cenário: {segmento_escolhido}")
+st.sidebar.markdown("Defina os indicadores macroeconômicos para o próximo mês.")
+
+# X_ultimo_real é um dicionário salvo no passo 05
+last_features = meta.get("X_ultimo_real", {})
+
+input_values = {}
+
+# 1. Selic (Variável chave)
+default_selic = last_features.get('selic', 10.75)
+selic_input = st.sidebar.slider("Selic (%)", 2.0, 20.0, float(default_selic), 0.25)
+input_values['selic'] = selic_input
+
+# 2. IPCA (Inflação)
+default_ipca = last_features.get('ipca', 0.5)
+ipca_input = st.sidebar.slider("IPCA Mensal (%)", -1.0, 2.0, float(default_ipca), 0.1)
+input_values['ipca'] = ipca_input
+
+# 3. Dólar (Importante para Rural/PJ)
+default_dolar = last_features.get('dolar_ptax', 5.0)
+dolar_input = st.sidebar.number_input("Dólar (R$)", 3.0, 8.0, float(default_dolar), 0.1)
+input_values['dolar_ptax'] = dolar_input
+
+# 4. Inadimplência Anterior (Inércia)
+valor_referencia_real = meta['valor_ultimo_real']
+inad_anterior_simulada = st.sidebar.number_input(
+    f"Inadimplência Atual (%) - Ref: {meta['data_referencia'].date()}", 
+    0.0, 20.0, float(valor_referencia_real), 0.1,
+    help="O modelo usa o mês anterior como ponto de partida (Inércia)."
+)
+input_values['inad_anterior'] = inad_anterior_simulada
+
+st.sidebar.markdown("---")
+st.sidebar.caption("*Demais variáveis são mantidas no último valor observado (Ceteris Paribus).*")
+
+# --- 5. Processamento da Previsão ---
+
+# A. Montar o DataFrame de Entrada
+df_input = pd.DataFrame([last_features])
+
+# Garantir que o DF tenha todas as colunas esperadas pelo modelo, na ordem certa
+for col in feature_cols:
+    if col not in df_input.columns:
+        df_input[col] = 0
+
+# Reordenar colunas
+df_input = df_input[feature_cols]
+
+# B. Atualizar com os inputs do usuário
+for col, val in input_values.items():
+    if col in df_input.columns:
+        df_input[col] = val
+    
+    if f"{col}_lag_3" in df_input.columns: df_input[f"{col}_lag_3"] = val
+    if f"{col}_lag_6" in df_input.columns: df_input[f"{col}_lag_6"] = val
+
+# C. Escalar e Prever
+X_scaled = scaler.transform(df_input)
+delta_pred = model.predict(X_scaled)[0]
+
+# D. Calcular Resultado Final
+# Previsão = Ponto de Partida (Simulado) + Variação Prevista
+previsao_final = inad_anterior_simulada + delta_pred
+
+# Trava de segurança (não existe inadimplência negativa)
+previsao_final = max(0.0, previsao_final)
+
+# --- 6. Exibição dos Resultados (Dashboard) ---
+
+st.subheader(f"📊 Resultados da Simulação: {segmento_escolhido}")
+
+c1, c2, c3 = st.columns(3)
+
+with c1:
+    st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+    st.metric(
+        "Cenário Atual (Base)", 
+        f"{inad_anterior_simulada:.2f}%",
+        help="Ponto de partida informado na sidebar"
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with c2:
+    st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+    st.metric(
+        "Variação Prevista (Delta)", 
+        f"{delta_pred:+.2f} p.p.",
+        delta_color="inverse" 
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with c3:
+    st.markdown('<div class="metric-card" style="border: 2px solid #4CAF50;">', unsafe_allow_html=True)
+    st.metric(
+        "Previsão Próximo Mês", 
+        f"{previsao_final:.2f}%",
+        delta=f"{delta_pred:+.2f}",
+        delta_color="inverse"
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# --- 7. Gráfico de Sensibilidade ---
+st.markdown("---")
+st.subheader("🔎 Análise de Sensibilidade: Selic vs Inadimplência")
+st.markdown("Como a taxa de juros impacta este modelo específico, mantendo os outros fatores constantes?")
+
+# Gerar dados para o gráfico
+selic_range = np.linspace(2.0, 25.0, 40)
+preds_sensibilidade = []
+
+# Loop para simular vários cenários de Selic
+X_temp = df_input.copy()
+idx_selic = df_input.columns.get_loc("selic") if "selic" in df_input.columns else -1
+
+if idx_selic != -1:
+    # Matriz repetida (otimização numpy)
+    X_sens = np.tile(X_temp.values, (len(selic_range), 1))
+    # Substituir coluna Selic
+    X_sens[:, idx_selic] = selic_range
+    # Escalar
+    X_sens_scaled = scaler.transform(X_sens)
+    # Prever Deltas
+    deltas = model.predict(X_sens_scaled)
+    # Somar à base
+    preds_final = inad_anterior_simulada + deltas
+    
+    # Plotly
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=selic_range, 
+        y=preds_final,
+        mode='lines',
+        name='Curva de Reação',
+        line=dict(color='#ff4b4b', width=3)
+    ))
+    
+    # Marcador do ponto escolhido
+    fig.add_trace(go.Scatter(
+        x=[selic_input],
+        y=[previsao_final],
+        mode='markers',
+        name='Sua Escolha',
+        marker=dict(color='black', size=12)
+    ))
+    
+    fig.update_layout(
+        title="Curva de Sensibilidade da Selic",
+        xaxis_title="Taxa Selic (%)",
+        yaxis_title=f"Inadimplência Prevista {segmento_escolhido} (%)",
+        height=400,
+        hovermode="x unified"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.warning("A variável 'selic' não foi encontrada nas features deste modelo específico.")
+
+# Rodapé
+st.caption("Desenvolvido para análise estratégica de risco. Modelo preditivo v1.0")
